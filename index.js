@@ -54,21 +54,33 @@ app.get('/mare', async (req, res) => {
     let proxima = levels[currentIndex + 1] || 0.0;
     const tendencia = proxima > mareAtual ? "Subindo" : "Baixando";
 
+    // ---- NOVA LÓGICA INFALÍVEL PARA HORÁRIOS ----
     let proximaAlta = "--:--";
     let proximaBaixa = "--:--";
+    let maxMare = -Infinity;
+    let minMare = Infinity;
 
-    for (let i = currentIndex; i < levels.length - 1; i++) {
-      const prev = levels[i - 1] || levels[i] || 0;
-      const curr = levels[i] || 0;
-      const next = levels[i + 1] || 0;
+    // Olha as próximas 15 horas para pegar um ciclo completo garantido
+    const limite = Math.min(currentIndex + 15, levels.length);
 
-      if (proximaAlta === "--:--" && curr > prev && curr > next) proximaAlta = times[i].split("T")[1]; 
-      if (proximaBaixa === "--:--" && curr < prev && curr < next) proximaBaixa = times[i].split("T")[1];
-      if (proximaAlta !== "--:--" && proximaBaixa !== "--:--") break;
+    for (let i = currentIndex + 1; i < limite; i++) {
+      if (levels[i] > maxMare) {
+        maxMare = levels[i];
+        proximaAlta = times[i].split("T")[1]; // Pega apenas a hora, ex: "15:00"
+      }
+      if (levels[i] < minMare) {
+        minMare = levels[i];
+        proximaBaixa = times[i].split("T")[1];
+      }
     }
+    // ---------------------------------------------
 
     res.json({
-      praia: praia.nome, mareAtual: mareAtual.toFixed(2), tendencia, proximaAlta, proximaBaixa
+      praia: praia.nome, 
+      mareAtual: mareAtual.toFixed(2), 
+      tendencia, 
+      proximaAlta, 
+      proximaBaixa
     });
   } catch (error) {
     res.status(500).json({ error: "Erro ao buscar maré" });
