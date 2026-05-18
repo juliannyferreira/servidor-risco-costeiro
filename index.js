@@ -4,119 +4,131 @@ const axios = require('axios');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-const coordenadasPraias = {
-  "1": { nome: "Pina", lat: -8.0944, lon: -34.8805 },
-  "2": { nome: "Boa Viagem", lat: -8.1250, lon: -34.9011 },
-  "3": { nome: "Piedade", lat: -8.1808, lon: -34.9163 }
+// CONFIGURAÇÃO DAS PRAIAS (IDs E COORDENADAS)
+const coordenadas = {
+  '1': { lat: -8.0944, lon: -34.8805, nome: 'Pina' },
+  '2': { lat: -8.1250, lon: -34.9011, nome: 'Boa Viagem' },
+  '3': { lat: -8.1808, lon: -34.9163, nome: 'Piedade' }
 };
 
+// ROTA DO CLIMA (MANTIDA 100% OPERACIONAL)
 app.get('/clima', async (req, res) => {
   const { lat, lon } = req.query;
+  if (!lat || !lon) {
+    return res.status(400).json({ error: "Latitude e longitude são obrigatórias." });
+  }
+
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&hourly=relativehumidity_2m,apparent_temperature`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=America%2FRecife`;
     const response = await axios.get(url);
-    const climaLimpo = {
-      temperatura: response.data.current_weather.temperature,
-      vento: response.data.current_weather.windspeed,
-      umidade: response.data.hourly.relativehumidity_2m[0],
-      sensacao: response.data.hourly.apparent_temperature[0],
-      descricao: "Céu Limpo"
+    const current = response.data.current;
+
+    // Mapeamento simplificado para descrição do clima
+    const interpretarWeatherCode = (code) => {
+      if (code === 0) return "Céu Limpo";
+      if ([1, 2, 3].includes(code)) return "Parcialmente Nublado";
+      if ([45, 48].includes(code)) return "Névoa";
+      if ([51, 53, 55, 61, 63, 65, 80, 81, 82].includes(code)) return "Chuva Fraca / Moderada";
+      if ([71, 73, 75, 77, 85, 86].includes(code)) return "Neve";
+      if ([95, 96, 99].includes(code)) return "Tempestade";
+      return "Estável";
     };
-    res.json(climaLimpo);
+
+    res.json({
+      temperatura: current.temperature_2m,
+      sensacao: current.apparent_temperature,
+      umidade: current.relative_humidity_2m,
+      vento: current.wind_speed_10m,
+      descricao: interpretarWeatherCode(current.weather_code)
+    });
   } catch (error) {
-    res.status(500).json({ error: "Erro ao buscar clima" });
+    console.error("Erro na API de Clima:", error.message);
+    res.status(500).json({ error: "Erro ao obter dados de clima." });
   }
 });
 
+// ROTA DA MARÉ ATUALIZADA - UTILIZANDO A API PROFISSIONAL STORM GLASS
 app.get('/mare', async (req, res) => {
   const { id } = req.query;
-
-  // Mantém as mesmas coordenadas das suas praias do app
-  const coordenadas = {
-    '1': { lat: -8.0944, lon: -34.8805, nome: 'Pina' },
-    '2': { lat: -8.1250, lon: -34.9011, nome: 'Boa Viagem' },
-    '3': { lat: -8.1808, lon: -34.9163, nome: 'Piedade' }
-  };
-
-  const beach = coordenadas[id] || coordenadas['2']; // Padrão Boa Viagem se falhar
+  const beach = coordenadas[id] || coordenadas['2']; // Padrão Boa Viagem se o ID falhar
 
   try {
-    // NOVA URL: Agora mudamos para o modelo 'marine_tide' (Maré física astronômica)
-    const url = `https://marine-api.open-meteo.com/v1/marine?latitude=${beach.lat}&longitude=${beach.lon}&hourly=tide_height&timezone=America%2FRecife`;
-    
-    const response = await axios.get(url);
-    const hourlyData = response.data.hourly;
-    
-    if (!hourlyData || !hourlyData.tide_height) {
-      throw new Error("Dados de maré não encontrados");
-    }
+    // Chamada à API Storm Glass coletando os extremos (altas e baixas astronômicas)
+    const response = await axios.get(
+      `https://api.stormglass.io/v2/tide/extremes/point?lat=${beach.lat}&lng=${beach.lon}`,
+      {
+        headers: {
+          'Authorization': '1e133b7e-52bb-11f1-a148-0242ac120004-1e133c3c-52bb-11f1-a148-0242ac120004'
+        }
+      }
+    );
 
+    const extremes = response.data.data;
     const agora = new Date();
-    const horasLidas = hourlyData.time;
-    const maresLidas = hourlyData.tide_height; // Nível da água em metros devido à maré
 
-    let mareAtual = 0;
-    let proximaAlta = "--:--";
-    let proximaBaixa = "--:--";
+    let proximaAltaStr = "--:--";
+    let proximaBaixaStr = "--:--";
+    let alturaAlta = "0.0";
+    let alturaBaixa = "0.0";
+    let mareAtualCalculada = 0.5;
     let tendencia = "Estável";
-    
-    let menorDiferenca = Infinity;
-    let indiceAtual = 0;
 
-    // 1. Encontra a maré exata para a hora atual
-    horasLidas.forEach((horaStr, index) => {
-      const horaData = new Date(horaStr);
-      const diferenca = Math.abs(agora - horaData);
-      if (diferenca < menorDiferenca) {
-        menorDiferenca = diferenca;
-        mareAtual = maresLidas[index];
-        indiceAtual = index;
-      }
-    });
+    // Filtra os picos previstos que acontecerão a partir do horário de agora
+    const futurosEventos = extremes.filter(evento => new Date(evento.time) > agora);
 
-    // 2. Descobre a tendência olhando a hora seguinte
-    if (indiceAtual < maresLidas.length - 1) {
-      tendencia = maresLidas[indiceAtual + 1] > mareAtual ? "Subindo" : "Baixando";
+    // Identifica o primeiro pico de alta e o primeiro de baixa seguintes
+    const primeiraAlta = futurosEventos.find(e => e.type === 'high');
+    const primeiraBaixa = futurosEventos.find(e => e.type === 'low');
+
+    if (primeiraAlta) {
+      const horaAlta = new Date(primeiraAlta.time);
+      proximaAltaStr = horaAlta.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Recife' });
+      alturaAlta = primeiraAlta.height.toFixed(1);
     }
 
-    // 3. Procura os picos (Altas e Baixas) nas próximas 15 horas
-    let encontrouAlta = false;
-    let encontrouBaixa = false;
-
-    for (let i = indiceAtual; i < Math.min(indiceAtual + 15, maresLidas.length); i++) {
-      if (i === 0 || i === maresLidas.length - 1) continue;
-
-      const anterior = maresLidas[i - 1];
-      const atual = maresLidas[i];
-      const proximo = maresLidas[i + 1];
-      const horaFormatada = new Date(horasLidas[i]).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-
-      // Pico para cima -> Maré Alta (Preia-mar)
-      if (atual > anterior && atual > proximo && !encontrouAlta) {
-        proximaAlta = horaFormatada;
-        encontrouAlta = true;
-      }
-      // Pico para baixo -> Maré Baixa (Baixa-mar)
-      if (atual < anterior && atual < proximo && !encontrouBaixa) {
-        proximaBaixa = horaFormatada;
-        encontrouBaixa = true;
-      }
-
-      if (encontrouAlta && encontrouBaixa) break;
+    if (primeiraBaixa) {
+      const horaBaixa = new Date(primeiraBaixa.time);
+      proximaBaixaStr = horaBaixa.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Recife' });
+      alturaBaixa = primeiraBaixa.height.toFixed(1);
     }
 
-    // Retorna exatamente a mesma estrutura que o seu App React Native já espera!
+    // Calcula a tendência do movimento da água e o nível atual estimado em tempo real
+    if (futurosEventos.length > 0) {
+      const primeiroEvento = futurosEventos[0];
+      tendencia = primeiroEvento.type === 'high' ? "Subindo" : "Baixando";
+      
+      const tempoParaProximo = (new Date(primeiroEvento.time) - agora) / (1000 * 60 * 60); // em horas
+      
+      // Interpolação matemática para fazer o número flutuar dinamicamente
+      if (primeiroEvento.type === 'low') {
+        mareAtualCalculada = parseFloat(alturaBaixa) + (tempoParaProximo / 6) * (parseFloat(alturaAlta) - parseFloat(alturaBaixa));
+      } else {
+        mareAtualCalculada = parseFloat(alturaAlta) - (tempoParaProximo / 6) * (parseFloat(alturaAlta) - parseFloat(alturaBaixa));
+      }
+    }
+
+    // Trava de segurança visual para não exibir valores negativos falsos
+    if (mareAtualCalculada < 0.1) mareAtualCalculada = 0.1;
+
+    // Retorna exatamente a estrutura de dados profissional adaptada ao aplicativo
     res.json({
       praia: beach.nome,
-      mareAtual: mareAtual.toFixed(2), // Altura real da maré em metros (ex: 0.45m, 1.80m)
+      mareAtual: `${mareAtualCalculada.toFixed(1)}m`,
       tendencia: tendencia,
-      proximaAlta: proximaAlta,
-      proximaBaixa: proximaBaixa
+      proximaAlta: `Alta: ${alturaAlta}m às ${proximaAltaStr}`,
+      proximaBaixa: `Baixa: ${alturaBaixa}m às ${proximaBaixaStr}`
     });
 
   } catch (error) {
-    console.error("Erro ao buscar maré real:", error.message);
+    console.error("Erro na API StormGlass:", error.message);
     res.status(500).json({ error: "Erro ao obter dados de maré astronômica." });
   }
+});
+
+// INICIALIZAÇÃO DO SERVIDOR
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor Risco Costeiro rodando na porta ${PORT}`);
 });
