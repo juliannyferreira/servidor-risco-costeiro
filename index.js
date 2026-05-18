@@ -30,62 +30,93 @@ app.get('/clima', async (req, res) => {
 });
 
 app.get('/mare', async (req, res) => {
-  const { id } = req.query; 
-  const praia = coordenadasPraias[id];
-  
-  if (!praia) return res.status(404).json({ error: "Praia não encontrada" });
+  const { id } = req.query;
+
+  // Mantém as mesmas coordenadas das suas praias do app
+  const coordenadas = {
+    '1': { lat: -8.0944, lon: -34.8805, nome: 'Pina' },
+    '2': { lat: -8.1250, lon: -34.9011, nome: 'Boa Viagem' },
+    '3': { lat: -8.1808, lon: -34.9163, nome: 'Piedade' }
+  };
+
+  const beach = coordenadas[id] || coordenadas['2']; // Padrão Boa Viagem se falhar
 
   try {
-    const url = `https://marine-api.open-meteo.com/v1/marine?latitude=${praia.lat}&longitude=${praia.lon}&hourly=wave_height&timezone=America/Recife&cell_selection=sea`;
-    const response = await axios.get(url);
+    // NOVA URL: Agora mudamos para o modelo 'marine_tide' (Maré física astronômica)
+    const url = `https://marine-api.open-meteo.com/v1/marine?latitude=${beach.lat}&longitude=${beach.lon}&hourly=tide_height&timezone=America%2FRecife`;
     
-    const times = response.data.hourly.time;
-    const levels = response.data.hourly.wave_height;
-    const now = new Date();
-    let currentIndex = 0;
-    let minDiff = Infinity;
+    const response = await axios.get(url);
+    const hourlyData = response.data.hourly;
+    
+    if (!hourlyData || !hourlyData.tide_height) {
+      throw new Error("Dados de maré não encontrados");
+    }
 
-    times.forEach((timeStr, index) => {
-      const diff = Math.abs(new Date(timeStr) - now);
-      if (diff < minDiff) { minDiff = diff; currentIndex = index; }
-    });
+    const agora = new Date();
+    const horasLidas = hourlyData.time;
+    const maresLidas = hourlyData.tide_height; // Nível da água em metros devido à maré
 
-    let mareAtual = levels[currentIndex] || 0.0; 
-    let proxima = levels[currentIndex + 1] || 0.0;
-    const tendencia = proxima > mareAtual ? "Subindo" : "Baixando";
-
-    // ---- NOVA LÓGICA INFALÍVEL PARA HORÁRIOS ----
+    let mareAtual = 0;
     let proximaAlta = "--:--";
     let proximaBaixa = "--:--";
-    let maxMare = -Infinity;
-    let minMare = Infinity;
+    let tendencia = "Estável";
+    
+    let menorDiferenca = Infinity;
+    let indiceAtual = 0;
 
-    // Olha as próximas 15 horas para pegar um ciclo completo garantido
-    const limite = Math.min(currentIndex + 15, levels.length);
-
-    for (let i = currentIndex + 1; i < limite; i++) {
-      if (levels[i] > maxMare) {
-        maxMare = levels[i];
-        proximaAlta = times[i].split("T")[1]; // Pega apenas a hora, ex: "15:00"
+    // 1. Encontra a maré exata para a hora atual
+    horasLidas.forEach((horaStr, index) => {
+      const horaData = new Date(horaStr);
+      const diferenca = Math.abs(agora - horaData);
+      if (diferenca < menorDiferenca) {
+        menorDiferenca = diferenca;
+        mareAtual = maresLidas[index];
+        indiceAtual = index;
       }
-      if (levels[i] < minMare) {
-        minMare = levels[i];
-        proximaBaixa = times[i].split("T")[1];
-      }
-    }
-    // ---------------------------------------------
-
-    res.json({
-      praia: praia.nome, 
-      mareAtual: mareAtual.toFixed(2), 
-      tendencia, 
-      proximaAlta, 
-      proximaBaixa
     });
+
+    // 2. Descobre a tendência olhando a hora seguinte
+    if (indiceAtual < maresLidas.length - 1) {
+      tendencia = maresLidas[indiceAtual + 1] > mareAtual ? "Subindo" : "Baixando";
+    }
+
+    // 3. Procura os picos (Altas e Baixas) nas próximas 15 horas
+    let encontrouAlta = false;
+    let encontrouBaixa = false;
+
+    for (let i = indiceAtual; i < Math.min(indiceAtual + 15, maresLidas.length); i++) {
+      if (i === 0 || i === maresLidas.length - 1) continue;
+
+      const anterior = maresLidas[i - 1];
+      const atual = maresLidas[i];
+      const proximo = maresLidas[i + 1];
+      const horaFormatada = new Date(horasLidas[i]).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+      // Pico para cima -> Maré Alta (Preia-mar)
+      if (atual > anterior && atual > proximo && !encontrouAlta) {
+        proximaAlta = horaFormatada;
+        encontrouAlta = true;
+      }
+      // Pico para baixo -> Maré Baixa (Baixa-mar)
+      if (atual < anterior && atual < proximo && !encontrouBaixa) {
+        proximaBaixa = horaFormatada;
+        encontrouBaixa = true;
+      }
+
+      if (encontrouAlta && encontrouBaixa) break;
+    }
+
+    // Retorna exatamente a mesma estrutura que o seu App React Native já espera!
+    res.json({
+      praia: beach.nome,
+      mareAtual: mareAtual.toFixed(2), // Altura real da maré em metros (ex: 0.45m, 1.80m)
+      tendencia: tendencia,
+      proximaAlta: proximaAlta,
+      proximaBaixa: proximaBaixa
+    });
+
   } catch (error) {
-    res.status(500).json({ error: "Erro ao buscar maré" });
+    console.error("Erro ao buscar maré real:", error.message);
+    res.status(500).json({ error: "Erro ao obter dados de maré astronômica." });
   }
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT} 🚀`));
